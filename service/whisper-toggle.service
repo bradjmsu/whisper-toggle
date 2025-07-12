@@ -1,0 +1,21 @@
+[Unit]
+Description=Whisper Toggle Voice Transcription
+After=graphical-session.target
+Wants=graphical-session.target
+
+[Service]
+Type=simple
+Environment="DISPLAY=:0"
+Environment="WAYLAND_DISPLAY=wayland-0"
+Environment="XDG_RUNTIME_DIR=/run/user/1000"
+Environment="PATH=/home/brad/whisper_env/bin:/usr/local/bin:/usr/bin:/bin"
+Environment="PYTHONPATH=/home/brad/whisper_env/lib/python3.13/site-packages"
+WorkingDirectory=/home/brad
+ExecStart=/home/brad/whisper-service.sh
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target
