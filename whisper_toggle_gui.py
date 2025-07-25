@@ -489,6 +489,9 @@ class WhisperToggleGUI:
         elif output_method == 'paste':
             print("→ Copy and paste")
             self.copy_and_paste(text)
+        elif output_method == 'paste_ctrl_shift_v':
+            print("→ Copy and paste (Ctrl+Shift+V)")
+            self.copy_and_paste_ctrl_shift_v(text)
         else:
             print("→ Typing text")
             self.type_text(text)
@@ -551,6 +554,45 @@ class WhisperToggleGUI:
             except (subprocess.CalledProcessError, FileNotFoundError):
                 print("❌ Auto-paste failed - ydotool issue")
                 print("Text is in clipboard, paste manually with Ctrl+V")
+                
+        except Exception as e:
+            print(f"❌ Copy and paste error: {e}")
+            # Fallback to typing
+            self.type_text(text)
+    
+    def copy_and_paste_ctrl_shift_v(self, text):
+        """Copy text to clipboard and auto-paste it using Ctrl+Shift+V."""
+        try:
+            import subprocess
+            print(f"\n=== COPY AND PASTE (Ctrl+Shift+V) ===")
+            print(f"Processing: {text[:50]}..." if len(text) > 50 else f"Processing: {text}")
+            
+            # First copy to clipboard
+            try:
+                subprocess.run(['wl-copy'], input=text.encode(), check=True)
+                print("✓ Copied to clipboard (Wayland)")
+            except (subprocess.CalledProcessError, FileNotFoundError):
+                try:
+                    subprocess.run(['xclip', '-selection', 'clipboard'], input=text.encode(), check=True)
+                    print("✓ Copied to clipboard (X11)")
+                except (subprocess.CalledProcessError, FileNotFoundError):
+                    print("❌ No clipboard tool available")
+                    # Fallback to typing
+                    self.type_text(text)
+                    return
+            
+            # Small delay to ensure clipboard is updated
+            import time
+            time.sleep(0.1)
+            
+            # Now simulate Ctrl+Shift+V to paste
+            try:
+                # Use ydotool to simulate Ctrl+Shift+V
+                subprocess.run(['ydotool', 'key', 'ctrl+shift+v'], check=True)
+                print("✓ Auto-pasted with Ctrl+Shift+V")
+            except (subprocess.CalledProcessError, FileNotFoundError):
+                print("❌ Auto-paste failed - ydotool issue")
+                print("Text is in clipboard, paste manually with Ctrl+Shift+V")
                 
         except Exception as e:
             print(f"❌ Copy and paste error: {e}")

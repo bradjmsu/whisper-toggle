@@ -12,6 +12,34 @@ import tempfile
 import wave
 import struct
 
+def detect_optimal_device():
+    """Detect the best available device for Whisper inference."""
+    try:
+        import torch
+        if torch.cuda.is_available():
+            gpu_count = torch.cuda.device_count()
+            gpu_name = torch.cuda.get_device_name(0)
+            memory_gb = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+            print(f"✓ GPU detected: {gpu_name} ({memory_gb:.1f}GB VRAM)")
+            return 'cuda', f'{gpu_name} ({memory_gb:.1f}GB)'
+        else:
+            print("ℹ CUDA not available, using CPU")
+            return 'cpu', 'CPU'
+    except ImportError:
+        print("ℹ PyTorch not installed, using CPU")
+        return 'cpu', 'CPU'
+
+def get_optimal_compute_type(device):
+    """Get optimal compute type for the device."""
+    if device == 'cuda':
+        try:
+            import torch
+            # Use float16 for modern GPUs for speed
+            return 'float16'
+        except ImportError:
+            pass
+    return 'int8'  # CPU fallback
+
 class SimpleTranscriber:
     """Simple transcriber using command-line tools."""
     
@@ -22,6 +50,10 @@ class SimpleTranscriber:
         self.sample_rate = 16000  # Whisper expects 16kHz
         self.actual_sample_rate = None
         self.actual_channels = None
+        
+        # Initialize device settings
+        self.device_info = self._get_device_info()
+        self.whisper_model = None  # Cache the model instance
         
     def start_recording(self):
         """Start recording audio using smart device detection."""
@@ -120,6 +152,42 @@ class SimpleTranscriber:
         self.record_thread = threading.Thread(target=record_thread, daemon=True)
         self.record_thread.start()
     
+    def _get_device_info(self):
+        """Get device configuration from config or auto-detect."""
+        configured_device = self.config.get('device', 'auto')
+        configured_compute = self.config.get('compute_type', 'auto')
+        
+        if configured_device == 'auto':
+            device, device_name = detect_optimal_device()
+        else:
+            device = configured_device
+            if device == 'cuda':
+                try:
+                    import torch
+                    if torch.cuda.is_available():
+                        device_name = torch.cuda.get_device_name(0)
+                    else:
+                        print("⚠ CUDA requested but not available, falling back to CPU")
+                        device = 'cpu'
+                        device_name = 'CPU'
+                except ImportError:
+                    print("⚠ CUDA requested but PyTorch not available, falling back to CPU")
+                    device = 'cpu'
+                    device_name = 'CPU'
+            else:
+                device_name = 'CPU'
+        
+        if configured_compute == 'auto':
+            compute_type = get_optimal_compute_type(device)
+        else:
+            compute_type = configured_compute
+            
+        return {
+            'device': device,
+            'device_name': device_name,
+            'compute_type': compute_type
+        }
+    
     def stop_recording(self):
         """Stop recording and return audio data."""
         self.recording = False
@@ -187,13 +255,43 @@ class SimpleTranscriber:
                 
                 print("Using faster-whisper...")
                 model_size = self.config.get('whisper_model', 'base')
-                print(f"Loading model: {model_size}")
+                device = self.device_info['device']
+                compute_type = self.device_info['compute_type']
+                device_name = self.device_info['device_name']
                 
-                model = WhisperModel(
-                    model_size,
-                    device='cpu',
-                    compute_type='int8'
-                )
+                print(f"Loading model: {model_size}")
+                print(f"Device: {device_name} ({device})")
+                print(f"Compute type: {compute_type}")
+                
+                # Use cached model if available and settings haven't changed
+                model_cache_key = f"{model_size}_{device}_{compute_type}"
+                if (self.whisper_model is None or 
+                    getattr(self, '_model_cache_key', None) != model_cache_key):
+                    
+                    print("Loading new model...")
+                    start_time = time.time()
+                    
+                    # Create model with GPU memory limit if specified
+                    model_kwargs = {
+                        'model_size_or_path': model_size,
+                        'device': device,
+                        'compute_type': compute_type
+                    }
+                    
+                    # Add GPU memory limit if specified and using CUDA
+                    if device == 'cuda':
+                        gpu_memory_limit = self.config.get('gpu_memory_limit', 0)
+                        if gpu_memory_limit > 0:
+                            model_kwargs['device_index'] = [0]
+                            print(f"GPU memory limit: {gpu_memory_limit}GB")
+                    
+                    self.whisper_model = WhisperModel(**model_kwargs)
+                    self._model_cache_key = model_cache_key
+                    
+                    load_time = time.time() - start_time
+                    print(f"Model loaded in {load_time:.2f}s")
+                
+                model = self.whisper_model
                 
                 print(f"Transcribing with language: {self.config.get('language', 'en')}")
                 # Use GUI settings for VAD
@@ -209,6 +307,9 @@ class SimpleTranscriber:
                 
                 print(f"VAD settings - silence: {min_silence_ms}ms, speech threshold: {no_speech_thresh:.3f}")
                 
+                # Time the transcription for performance monitoring
+                transcribe_start = time.time()
+                
                 segments, info = model.transcribe(
                     tmp_path,
                     language=self.config.get('language', 'en'),
@@ -221,6 +322,8 @@ class SimpleTranscriber:
                     condition_on_previous_text=False
                 )
                 
+                transcribe_time = time.time() - transcribe_start
+                
                 # Collect segments
                 all_segments = []
                 for segment in segments:
@@ -228,6 +331,16 @@ class SimpleTranscriber:
                     print(f"Segment: {segment.text.strip()}")
                 
                 text = ' '.join(all_segments)
+                
+                # Performance reporting
+                audio_duration = len(audio_data) / (self.actual_sample_rate or 16000) / 2  # 16-bit samples
+                if audio_duration > 0:
+                    realtime_factor = transcribe_time / audio_duration
+                    print(f"📊 Performance: {transcribe_time:.2f}s transcription time for {audio_duration:.2f}s audio")
+                    print(f"📈 Real-time factor: {realtime_factor:.2f}x ({device_name})")
+                    if realtime_factor < 1.0:
+                        print("🚀 Faster than real-time!")
+                    
                 print(f"Combined text: {text}")
                 os.unlink(tmp_path)
                 return text

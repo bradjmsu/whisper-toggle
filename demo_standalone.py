@@ -27,6 +27,10 @@ class DemoConfig:
             'language': 'en',
             'continuous_mode': False,
             'output_method': 'type',
+            # GPU/Performance settings
+            'device': 'auto',  # auto, cpu, cuda
+            'compute_type': 'auto',  # auto, int8, float16, float32
+            'gpu_memory_limit': 0,  # 0 = no limit, >0 = GB limit
         }
     
     def get(self, key, default=None):
@@ -53,6 +57,9 @@ class DemoConfig:
     language = property(lambda self: self.config['language'])
     continuous_mode = property(lambda self: self.config.get('continuous_mode', False))
     output_method = property(lambda self: self.config.get('output_method', 'type'))
+    device = property(lambda self: self.config.get('device', 'auto'))
+    compute_type = property(lambda self: self.config.get('compute_type', 'auto'))
+    gpu_memory_limit = property(lambda self: self.config.get('gpu_memory_limit', 0))
 
 
 class HotkeyDialog(Gtk.Dialog):
@@ -167,6 +174,7 @@ class SettingsWindow(Gtk.Window):
         # Add tabs
         notebook.append_page(self.create_general_tab(), Gtk.Label(label="General"))
         notebook.append_page(self.create_audio_tab(), Gtk.Label(label="Audio"))
+        notebook.append_page(self.create_performance_tab(), Gtk.Label(label="Performance"))
         notebook.append_page(self.create_hotkey_tab(), Gtk.Label(label="Hotkey"))
         notebook.append_page(self.create_advanced_tab(), Gtk.Label(label="Advanced"))
         
@@ -284,6 +292,7 @@ class SettingsWindow(Gtk.Window):
         self.output_combo.append("type", "Type text (slower)")
         self.output_combo.append("clipboard", "Copy to clipboard only")
         self.output_combo.append("paste", "Copy and auto-paste (fastest)")
+        self.output_combo.append("paste_ctrl_shift_v", "Copy and paste (Ctrl+Shift+V)")
         current_method = self.config.get('output_method', 'type')
         self.output_combo.set_active_id(current_method)
         output_box.pack_start(self.output_combo, False, False, 0)
@@ -452,6 +461,157 @@ class SettingsWindow(Gtk.Window):
         
         return vbox
     
+    def create_performance_tab(self):
+        """Create performance/GPU settings tab."""
+        vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        vbox.set_border_width(10)
+        
+        # Device selection
+        device_frame = Gtk.Frame(label="Processing Device")
+        vbox.pack_start(device_frame, False, False, 0)
+        
+        device_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
+        device_box.set_border_width(10)
+        device_frame.add(device_box)
+        
+        # Get current device info
+        try:
+            from transcriber_simple import detect_optimal_device
+            optimal_device, device_name = detect_optimal_device()
+            has_gpu = optimal_device == 'cuda'
+        except ImportError:
+            optimal_device, device_name = 'cpu', 'CPU'
+            has_gpu = False
+        
+        # Device selection combo
+        self.device_combo = Gtk.ComboBoxText()
+        self.device_combo.append("auto", f"Auto-detect (Currently: {device_name})")
+        self.device_combo.append("cpu", "CPU Only")
+        if has_gpu:
+            self.device_combo.append("cuda", f"GPU (CUDA) - {device_name}")
+        else:
+            self.device_combo.append("cuda", "GPU (CUDA) - Not Available")
+            # Disable CUDA option if not available
+            model = self.device_combo.get_model()
+            iter_cuda = model.get_iter_from_string("2")  # CUDA is the 3rd item (index 2)
+            model.set_value(iter_cuda, 1, False)  # Make it insensitive
+        
+        current_device = self.config.get('device', 'auto')
+        self.device_combo.set_active_id(current_device)
+        device_box.pack_start(self.device_combo, False, False, 0)
+        
+        # Device status info
+        status_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        device_box.pack_start(status_box, False, False, 0)
+        
+        status_label = Gtk.Label(label="Status:")
+        status_box.pack_start(status_label, False, False, 0)
+        
+        if has_gpu:
+            try:
+                import torch
+                gpu_name = torch.cuda.get_device_name(0)
+                memory_gb = torch.cuda.get_device_properties(0).total_memory / (1024**3)
+                self.device_status = Gtk.Label()
+                self.device_status.set_markup(f"✓ <b>{gpu_name}</b> ({memory_gb:.1f}GB VRAM)")
+                self.device_status.get_style_context().add_class("dim-label")
+            except ImportError:
+                self.device_status = Gtk.Label(label="⚠ PyTorch not available")
+        else:
+            self.device_status = Gtk.Label(label="ℹ GPU not available")
+        
+        status_box.pack_start(self.device_status, False, False, 0)
+        
+        # Compute type selection
+        compute_frame = Gtk.Frame(label="Compute Precision")
+        vbox.pack_start(compute_frame, False, False, 0)
+        
+        compute_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
+        compute_box.set_border_width(10)
+        compute_frame.add(compute_box)
+        
+        self.compute_combo = Gtk.ComboBoxText()
+        self.compute_combo.append("auto", "Auto-select (Recommended)")
+        self.compute_combo.append("int8", "INT8 - Fastest, less accurate")
+        self.compute_combo.append("float16", "FLOAT16 - Balanced (GPU only)")
+        self.compute_combo.append("float32", "FLOAT32 - Slowest, most accurate")
+        
+        current_compute = self.config.get('compute_type', 'auto')
+        self.compute_combo.set_active_id(current_compute)
+        compute_box.pack_start(self.compute_combo, False, False, 0)
+        
+        # Compute type info
+        compute_info = Gtk.Label()
+        compute_info.set_markup("<small><i>Auto-select chooses INT8 for CPU, FLOAT16 for GPU</i></small>")
+        compute_info.set_xalign(0)
+        compute_box.pack_start(compute_info, False, False, 0)
+        
+        # GPU Memory limit (only show if GPU available)
+        if has_gpu:
+            memory_frame = Gtk.Frame(label="GPU Memory Management")
+            vbox.pack_start(memory_frame, False, False, 0)
+            
+            memory_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
+            memory_box.set_border_width(10)
+            memory_frame.add(memory_box)
+            
+            # Memory limit slider
+            mem_limit_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+            mem_limit_label = Gtk.Label(label="Memory limit (GB):")
+            mem_limit_box.pack_start(mem_limit_label, False, False, 0)
+            
+            self.memory_scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 24, 1)
+            self.memory_scale.set_value(self.config.get('gpu_memory_limit', 0))
+            self.memory_scale.set_draw_value(True)
+            self.memory_scale.set_value_pos(Gtk.PositionType.RIGHT)
+            self.memory_scale.connect("value-changed", self.on_memory_limit_changed)
+            mem_limit_box.pack_start(self.memory_scale, True, True, 0)
+            
+            memory_box.pack_start(mem_limit_box, False, False, 0)
+            
+            # Memory info
+            self.memory_info = Gtk.Label()
+            self.update_memory_info()
+            self.memory_info.set_xalign(0)
+            memory_box.pack_start(self.memory_info, False, False, 0)
+        
+        # Performance tips
+        tips_frame = Gtk.Frame(label="Performance Tips")
+        vbox.pack_end(tips_frame, False, False, 0)
+        
+        tips_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
+        tips_box.set_border_width(10)
+        tips_frame.add(tips_box)
+        
+        tips = [
+            "• Use GPU (CUDA) for 10-20x faster transcription",
+            "• FLOAT16 provides best speed/accuracy balance on GPU",
+            "• Larger models (medium/large) benefit most from GPU acceleration",
+            "• Set memory limit if running other GPU applications"
+        ]
+        
+        for tip in tips:
+            tip_label = Gtk.Label(label=tip)
+            tip_label.set_xalign(0)
+            tip_label.get_style_context().add_class("dim-label")
+            tips_box.pack_start(tip_label, False, False, 0)
+        
+        return vbox
+    
+    def on_memory_limit_changed(self, scale):
+        """Handle memory limit slider change."""
+        if hasattr(self, 'memory_info'):
+            self.update_memory_info()
+    
+    def update_memory_info(self):
+        """Update memory limit info text."""
+        if hasattr(self, 'memory_scale'):
+            limit = int(self.memory_scale.get_value())
+            if limit == 0:
+                self.memory_info.set_markup("<small><i>0 = No limit (use all available GPU memory)</i></small>")
+            else:
+                self.memory_info.set_markup(f"<small><i>Limit GPU usage to {limit}GB</i></small>")
+    
     def create_advanced_tab(self):
         """Create advanced settings tab."""
         vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
@@ -594,6 +754,14 @@ class SettingsWindow(Gtk.Window):
         hotkey = self.hotkey_label.get_text()
         if hotkey:
             self.config.set('toggle_key', hotkey)
+        
+        # Save GPU/Performance settings
+        if hasattr(self, 'device_combo'):
+            self.config.set('device', self.device_combo.get_active_id())
+        if hasattr(self, 'compute_combo'):
+            self.config.set('compute_type', self.compute_combo.get_active_id())
+        if hasattr(self, 'memory_scale'):
+            self.config.set('gpu_memory_limit', int(self.memory_scale.get_value()))
     
     def on_cancel_clicked(self, button):
         """Handle cancel button click."""

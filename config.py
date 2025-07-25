@@ -26,6 +26,10 @@ class Config:
             'language': 'en',
             'continuous_mode': False,
             'output_method': 'type',
+            # GPU/Performance settings
+            'device': 'auto',  # auto, cpu, cuda
+            'compute_type': 'auto',  # auto, int8, float16, float32
+            'gpu_memory_limit': 0,  # 0 = no limit, >0 = GB limit
         }
         
         # Config file location
@@ -135,3 +139,15 @@ class Config:
     @property
     def output_method(self):
         return self.get('output_method')
+    
+    @property
+    def device(self):
+        return self.get('device')
+    
+    @property
+    def compute_type(self):
+        return self.get('compute_type')
+    
+    @property
+    def gpu_memory_limit(self):
+        return self.get('gpu_memory_limit')
